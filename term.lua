@@ -24,6 +24,10 @@ end
 -- represent the arguments to the term.
 local Repr = {}
 
+-- Store a lookup table from reprs to strings.
+Repr.pretty_ctr = 0
+Repr.pretty_index = {}
+
 -- Lua tables are pass by reference. But we will want a single instance of nil
 -- in order to check for bot.
 
@@ -38,6 +42,7 @@ setmetatable(Repr.bot, {
     end
 })
 
+
 -- Now we can just check if a repr is nil by checking if it points to the same
 -- table in memory!
 Repr.is_bot = function(r)
@@ -50,11 +55,16 @@ end
 
 -- We put this in the prototype for inheritance.
 Repr.tostring = function(self)
-    local tail_str = ""
-    for k, v in pairs(self.tail) do
-        tail_str = tail_str .. tostring(v) .. ", "
+    local s = Repr.pretty_index[self]
+    if s then
+        return tostring( s() or "" )
+    else
+        local tail_str = ""
+        for k, v in pairs(self.tail) do
+            tail_str = tail_str .. tostring(v) .. ", "
+        end
+        return string.format("Repr(%s, %s, {%s})", self.kind, tostring(self.head), tail_str)
     end
-    return string.format("Repr(%s, %s, {%s})", self.kind, tostring(self.head), tail_str)
 end  
 
 -- Normally one also includes an 'identifier' field in a term. For Lua, this is
@@ -70,7 +80,19 @@ Repr.new = function(kind, head, ...)
       __index = Repr,
       __tostring = Repr.tostring
     })
+
+    -- Register internal pretty printer
+    local i = tostring(Repr.pretty_ctr)
+    Repr.pretty_index[repr] = function()
+        return tostring(i)
+    end
+    Repr.pretty_ctr = Repr.pretty_ctr + 1
+
     return repr
+end
+
+Repr.register = function(self, label_func)
+    Repr.pretty_index[self] = label_func
 end
 
 Repr.fresh = function()
@@ -99,6 +121,12 @@ Term.APP = Repr.new(KINDS.TERM, Repr.fresh())
 Term.var = function(name)
     local repr = Repr.new(KINDS.TERM, Term.VAR, name)
     setmetatable(repr, { __index = Term, __tostring = Repr.tostring })
+
+    local s = Repr.pretty_index[repr]
+    -- Vars are represented as "xi", by default
+    repr:register(function()
+        return "x" .. tostring(s())
+    end)
     return repr
 end
 
@@ -122,6 +150,12 @@ end
 Term.app = function(func, arg)
     local repr = Repr.new(KINDS.TERM, Term.APP, func, arg)
     setmetatable(repr, { __index = Term, __tostring = Repr.tostring })
+
+    -- M N is represented as "M" "N", by default
+    repr:register(function()
+        return string.format("(%s) (%s)", tostring(func), tostring(arg))
+    end)
+
     return repr
 end
 
@@ -138,6 +172,11 @@ end
 Term.lam = function(bound_var, body)
     local repr = Repr.new(KINDS.TERM, Term.LAM, bound_var, body)
     setmetatable(repr, { __index = Term, __tostring = Repr.tostring })
+
+    repr:register(function()
+        return string.format("lam %s . (%s)", tostring(bound_var), tostring(body))
+    end)
+
     return repr
 end
 
@@ -165,6 +204,16 @@ Envr.new = function(bindings)
     local repr = Repr.new(KINDS.ENVR, Repr.bot, Repr.bot)
     repr.bindings = bindings
 
+    local s = Repr.pretty_index[repr]
+
+    repr:register(function()
+        local cts = ""
+        for k,v in pairs(repr.bindings) do
+            cts = cts .. tostring(k) .. " -> " .. tostring(v) .. ", "
+        end
+        return "Envr(" .. tostring(s())  .. "){ " .. cts .. "}"
+    end)
+
     -- Since lookup points to bindings, we need this subtable to point to the
     -- prototype.
     setmetatable(repr.bindings, { __index = Repr })
@@ -175,12 +224,17 @@ Envr.new = function(bindings)
             self.bindings[k] = v
         end,
         __tostring = function(self)
-            local s = Repr.tostring(self)
-            local cts = ""
-            for k,v in pairs(self.bindings) do
-                cts = cts .. tostring(k) .. " -> " .. tostring(v) .. ", "
+            local s = Repr.pretty_index[self]
+            if s then
+                return s()
+            else
+                local s = Repr.tostring(self)
+                local cts = ""
+                for k,v in pairs(self.bindings) do
+                    cts = cts .. tostring(k) .. " -> " .. tostring(v) .. ", "
+                end
+                return s .. ":{ " .. cts .. " }"
             end
-            return s .. ":{ " .. cts .. " }"
         end
     })
     return repr
@@ -213,12 +267,39 @@ Cont.HALT = Repr.new(KINDS.CONT, Repr.fresh())
 Cont.PUSH = Repr.new(KINDS.CONT, Repr.fresh())
 Cont.RETURN = Repr.new(KINDS.CONT, Repr.fresh())
 
+-- We have to construct the pretty printer at define time.
+Cont.Prettify_Methods = {}
+
+Cont.Prettify_Methods[Cont.HALT] = function(x, env, k)
+    return function ()
+        return "HALT"
+    end
+end
+
+Cont.Prettify_Methods[Cont.PUSH] = function(x, env, k)
+    return function () 
+        return string.format("PUSH(%s,%s) :: %s", tostring(x), tostring(env), tostring(k))
+    end
+end
+
+Cont.Prettify_Methods[Cont.RETURN] = function(x, env, k)
+    return function()
+        string.format("[_ -> (%s,%s)] :: %s", tostring(x), tostring(env), tostring(k))
+    end
+end
+
 Cont.Halt = Repr.new(KINDS.CONT, Cont.HALT, Repr.bot)
 setmetatable(Cont.Halt, { __index = Cont, __tostring = Repr.tostring })
+local s = Cont.Prettify_Methods[Cont.HALT]()
+Cont.Halt:register(s)
+
 
 Cont.New = function(head, x, env, k)
     local repr = Repr.new(KINDS.CONT, head, x, env, k)
     setmetatable(repr, { __index = Cont, __tostring = Repr.tostring })
+    
+    local s = Cont.Prettify_Methods[head](x, env, k)
+    repr:register(s)
     return repr
 end
 
@@ -311,8 +392,7 @@ CK.steps[Term.VAR][Cont.HALT] = function(self)
         self.env    = snd(closure)
         return
     else
-        local var_name = Term.var_name(self.term)
-        return tostring(var_name)
+        return tostring(self.term)
     end
 
     error("This line should be unreachable.")
@@ -326,9 +406,8 @@ CK.steps[Term.VAR][Cont.PUSH] = function(self)
         self.env    = snd(closure)
         return
     else
-        local var_name = Term.var_name(self.term)
         local arg = Cont.push_arg(self.cont)
-        return string.format("%s @PUSH %s", tostring(var_name), tostring(arg))
+        return string.format("%s @PUSH %s", tostring(self.term), tostring(arg))
     end
 
     error("This line should be unreachable.")
@@ -466,8 +545,14 @@ end
 
 -- Now we write an example program.
 x = Term.fresh_var()
+x:register(function() return "x" end)
+
 y = Term.fresh_var()
+y:register(function() return "y" end)
+
 z = Term.fresh_var()
+z:register(function() return "z" end)
+
 
 omega = Term.lam(x, Term.app(x, x))
 Omega = Term.app(omega, omega)
@@ -481,28 +566,11 @@ program = Term.app(
 
 ck_state = CK.new(program, Envr.empty, Cont.Halt)
 
-print("----------")
-print("Repr.bot: " .. tostring(Repr.bot))
-print("Term.VAR: " .. tostring(Term.VAR))
-print("Term.LAM: " .. tostring(Term.LAM))
-print("Term.APP: " .. tostring(Term.APP))
-
-print("Envr.empty: " .. tostring(Envr.empty))
-
-print("Cont.HALT: " .. tostring(Cont.HALT))
-print("Cont.PUSH: " .. tostring(Cont.PUSH))
-print("Cont.RETURN: " .. tostring(Cont.RETURN))
-print("Cont.Halt: " .. tostring(Cont.Halt))
-print("----------")
-
-print("x: " .. tostring(x))
-print("y: " .. tostring(y))
-print("z: " .. tostring(z))
-
-print("----------")
-
+print(tostring(program))
+print("===============")
 res = ck_state:run()
 print(string.format("FINAL VALUE: %s", res)) -- should print y
+print("===============")
 print(string.format("FINAL TERM: %s", tostring(ck_state.term)))
 print(string.format("FINAL CONT: %s", tostring(ck_state.cont)))
 print(string.format("FINAL ENVR: %s", tostring(ck_state.env)))
