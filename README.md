@@ -22,5 +22,6 @@ TODO
 3. Add basic operations.
    * Make this an interpreted language.
    * ComputerCraft primitives.
-4. `call/cc`
+4. Load and store state of CK machine to disk.
+5. `call/cc`
    * All my homies love classical realizability.
