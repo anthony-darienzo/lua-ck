@@ -28,6 +28,10 @@ local Repr = {}
 Repr.pretty_ctr = 0
 Repr.pretty_index = {}
 
+-- If either a key or value is GC'ed, the whole pair gets GC'ed.
+-- Basically, the pretty printer shouldn't block anything from getting GC'ed.
+setmetatable(Repr.pretty_index, { __mode = "kv" })
+
 -- Lua tables are pass by reference. But we will want a single instance of nil
 -- in order to check for bot.
 
@@ -101,7 +105,7 @@ Repr.fresh = function()
 end
 
 -- Tables are pass by reference. If we want to duplicate a repr, we will need to
--- deep copy its elements.
+-- copy its elements.
 function Repr.dupl(r)
     return Repr.new(r.kind, r.head, table.unpack(r.tail))
 end
