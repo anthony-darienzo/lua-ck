@@ -46,22 +46,19 @@ Repr.pretty_index = {}
 -- Basically, the pretty printer shouldn't block anything from getting GC'ed.
 setmetatable(Repr.pretty_index, { __mode = "k" })
 
--- We put this in the prototype for inheritance.
-function Repr.tostring (self)
-    local s = Repr.pretty_index[self]
-    if s then
-        return tostring( s() or "" )
-    else
-        local tail_str = ""
-        for k, v in pairs(self.tail) do
-            tail_str = tail_str .. tostring(v) .. ", "
-        end
-        return string.format("Repr(%s, %s, {%s})", self.kind, tostring(self.head), tail_str)
-    end
-end
-
 Repr:metamethods {
-    __tostring = Repr.tostring
+    __tostring = function (self)
+        local s = Repr.pretty_index[self]
+        if s then
+            return tostring( s() or "" )
+        else
+            local tail_str = ""
+            for k, v in pairs(self.tail) do
+                tail_str = tail_str .. tostring(v) .. ", "
+            end
+            return string.format("Repr(%s, %s, {%s})", self.kind, tostring(self.head), tail_str)
+        end
+    end
 }
 
 function Repr.register (self, l)
