@@ -18,7 +18,9 @@ TODO
       ~~also means my dirty implementation is horrendous to read.~~
 2. Clean up code:
    * Think about the logic of when well-definedness of syntactic objects should be checked.
-      Streamline Lua metatables for inheritance when appropriate.
+      ~~Streamline Lua metatables for inheritance when appropriate.~~
+   * Revisit logic of `Prototype.lua` to see if it can be simplified (almost
+     certainly yes).
 3. Add basic operations.
    * Make this an interpreted language.
    * ComputerCraft primitives.

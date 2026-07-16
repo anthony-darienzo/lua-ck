@@ -2,6 +2,9 @@
 -- refer to basic 'inductive types' as labeled tables.
 
 -- Eventually, we will build a CK-machine.
+
+local Prototype = require "Prototype"
+
 local KINDS = {
     TYPE = "type",
     TERM = "term",
@@ -22,43 +25,29 @@ end
 -- three fields: 'kind', 'head', and 'tail'. The 'head' is a repr that
 -- represents the prototype of the term. The 'tail' is a list of reprs that
 -- represent the arguments to the term.
-local Repr = {}
+--
+-- Normally one also includes an 'identifier' field in a term. For Lua, this is
+-- not necessary! This is because Lua tables are pass by reference.
+local Repr = Prototype:Refine(function (This, kind, head, ...)
+    local tail = {...}
+    local obj = {kind = kind, head = head, tail = tail}
 
--- Store a lookup table from reprs to strings.
+    local i = tostring(This.pretty_ctr)
+    This.pretty_index[obj] = function() return tostring(i) end
+    This.pretty_ctr = This.pretty_ctr + 1
+
+    return obj
+end)
+
 Repr.pretty_ctr = 0
 Repr.pretty_index = {}
 
 -- If either a key or value is GC'ed, the whole pair gets GC'ed.
 -- Basically, the pretty printer shouldn't block anything from getting GC'ed.
-setmetatable(Repr.pretty_index, { __mode = "kv" })
-
--- Lua tables are pass by reference. But we will want a single instance of nil
--- in order to check for bot.
-
--- NOTE: In Lua, we cannot index by 'nil'. We will call this 'bot' instead.
-Repr.bot = { kind = KINDS.LITR }
-Repr.bot.head = Repr.bot
-Repr.bot.tail = { Repr.bot }
-setmetatable(Repr.bot, {
-    __index = Repr,
-    __tostring = function(self)
-        return "Repr(nil)"
-    end
-})
-
-
--- Now we can just check if a repr is nil by checking if it points to the same
--- table in memory!
-Repr.is_bot = function(r)
-    return r == Repr.bot
-end
-
-Repr.verify_t = function(t)
-    return (type(t) == "table" and t.kind and t.head and t.tail)
-end
+setmetatable(Repr.pretty_index, { __mode = "k" })
 
 -- We put this in the prototype for inheritance.
-Repr.tostring = function(self)
+function Repr.tostring (self)
     local s = Repr.pretty_index[self]
     if s then
         return tostring( s() or "" )
@@ -69,79 +58,112 @@ Repr.tostring = function(self)
         end
         return string.format("Repr(%s, %s, {%s})", self.kind, tostring(self.head), tail_str)
     end
-end  
+end
 
--- Normally one also includes an 'identifier' field in a term. For Lua, this is
--- not necessary! This is because Lua tables are pass by reference.
-Repr.new = function(kind, head, ...)
-    local tail = {...} or { Repr.bot }
-    local repr = {
-        kind = kind,
-        head = head,
-        tail = tail,
-    }
-    setmetatable(repr, {
-      __index = Repr,
-      __tostring = Repr.tostring
-    })
+Repr:metamethods {
+    __tostring = Repr.tostring
+}
 
-    -- Register internal pretty printer
-    local i = tostring(Repr.pretty_ctr)
-    Repr.pretty_index[repr] = function()
-        return tostring(i)
+function Repr.register (self, l)
+    if type(l) == "string" then
+        Repr.pretty_index[self] = function() return l end
+    elseif type(l) == "function" then
+        Repr.pretty_index[self] = l
     end
-    Repr.pretty_ctr = Repr.pretty_ctr + 1
-
-    return repr
 end
 
-Repr.register = function(self, label_func)
-    Repr.pretty_index[self] = label_func
+-- Lua tables are pass by reference. But we will want a single instance of nil
+-- in order to check for bot.
+--
+-- This is a bit hacky since it introduces a cyclic reference. Oh well.
+Repr.bot = Repr:new(KINDS.LITR, nil)
+Repr.bot.head = Repr.bot
+Repr.bot:register("Repr(nil)")
+
+-- Now we can just check if a repr is nil by checking if it points to the same
+-- table in memory!
+function Repr.is_bot (self, r)
+    return r == self.bot
 end
 
-Repr.fresh = function()
+function Repr.verify_t (self)
+    return Prototype.parent(self) == Repr and self.kind and self.head and self.tail
+end
+
+function Repr.fresh ()
     -- Pass a fresh table to get a new ref.
-    return Repr.new(KINDS.LITR, {})
+    return Repr:new(KINDS.LITR)
 end
 
 -- Tables are pass by reference. If we want to duplicate a repr, we will need to
 -- copy its elements.
-function Repr.dupl(r)
-    return Repr.new(r.kind, r.head, table.unpack(r.tail))
+function Repr.dupl(self)
+    return Repr:new(self.kind, self.head, table.unpack(self.tail))
 end
 
-
 -- Now let's use the Repr prototype to define the syntax of a lambda calculus.
-local Term = {}
-setmetatable(Term, { __index = Repr })
+local Term = Repr:Refine(function(This, CAT, x1, x2) 
+    return This.Constructors[CAT](This, x1, x2)
+end)
 
 -- Since the head of a repr is a repr, the combinators of our lambda calculus
--- are reprs.
-Term.VAR = Repr.new(KINDS.TERM, Repr.fresh())
-Term.LAM = Repr.new(KINDS.TERM, Repr.fresh())
-Term.APP = Repr.new(KINDS.TERM, Repr.fresh())
+-- are reprs. These for our CATegories.
+Term.VAR = Repr:new(KINDS.LITR, Repr.fresh())
+Term.LAM = Repr:new(KINDS.LITR, Repr.fresh())
+Term.APP = Repr:new(KINDS.LITR, Repr.fresh())
 
--- Since a var is "atomic", the only element of its tail is the name of the var.
-Term.var = function(name)
-    local repr = Repr.new(KINDS.TERM, Term.VAR, name)
-    setmetatable(repr, { __index = Term, __tostring = Repr.tostring })
+Term.VAR:register("VAR")
+Term.LAM:register("LAM")
+Term.APP:register("APP")
 
+-- How a term is built depends on the CAT.
+Term.Constructors = {}
+
+Term.Constructors[Term.VAR] = function(This, name)
+    local repr = Repr:new(KINDS.TERM, Term.VAR, name)
     local s = Repr.pretty_index[repr]
-    -- Vars are represented as "xi", by default
+    -- Vars are represented as "xi" by default.
     repr:register(function()
         return "x" .. tostring(s())
     end)
     return repr
 end
 
-Term.fresh_var = function()
-    return Term.var(Repr.fresh())
+Term.Constructors[Term.APP] = function(This, f, x)
+    local repr = Repr:new(KINDS.TERM, Term.APP, f, x)
+    -- M N is represented as "M" "N", by default
+    repr:register(function()
+        return string.format("(%s) (%s)", tostring(f), tostring(x))
+    end)
+    return repr
+end
+
+Term.Constructors[Term.LAM] = function(This, x, body)
+    local repr = Repr:new(KINDS.TERM, Term.LAM, x, body)
+    repr:register(function()
+        return string.format("lam %s . (%s)", tostring(x), tostring(body))
+    end)
+    return repr
+end
+
+function Term.var (name)
+    return Term:new(Term.VAR, name)
+end
+
+function Term.app (f, x)
+    return Term:new(Term.APP, f, x)
+end
+
+function Term.lam (x, body)
+    return Term:new(Term.LAM, x, body)
+end
+
+function Term.fresh_var ()
+    return Term:new(Term.VAR, Repr.fresh())
 end
 
 function Term.is_var(t)
-    local wf = Repr.verify_t(t)
-    return Repr.verify_t(t)
-        and t.kind == KINDS.TERM 
+    return Prototype.parent(t) == Term
         and t.head == Term.VAR
         and #t.tail == 1
 end
@@ -149,18 +171,6 @@ end
 function Term.var_name(t)
     assert(Term.is_var(t), "Invalid variable: " .. tostring(t))
     return t.tail[1]
-end
-
-Term.app = function(func, arg)
-    local repr = Repr.new(KINDS.TERM, Term.APP, func, arg)
-    setmetatable(repr, { __index = Term, __tostring = Repr.tostring })
-
-    -- M N is represented as "M" "N", by default
-    repr:register(function()
-        return string.format("(%s) (%s)", tostring(func), tostring(arg))
-    end)
-
-    return repr
 end
 
 function Term.app_func(t)
@@ -171,17 +181,6 @@ end
 function Term.app_arg(t)
     assert(t.kind == KINDS.TERM and t.head == Term.APP, "Invalid application: " .. tostring(t))
     return t.tail[2]
-end
-
-Term.lam = function(bound_var, body)
-    local repr = Repr.new(KINDS.TERM, Term.LAM, bound_var, body)
-    setmetatable(repr, { __index = Term, __tostring = Repr.tostring })
-
-    repr:register(function()
-        return string.format("lam %s . (%s)", tostring(bound_var), tostring(body))
-    end)
-
-    return repr
 end
 
 function Term.lam_bound_var(t)
@@ -197,17 +196,15 @@ end
 -- If this were just the lambda calculus, we would need to implement
 -- capture-avoiding substitution now. Instead, applications will push arguments
 -- to an environment.
-local Envr = {}
-setmetatable(Envr, { __index = Repr, __tostring = Repr.tostring })
-
+--
 -- An environment is a hashtable from variables to terms. Lua makes this easy.
 -- We put the environment's contents into a new field called `bindings`. Head
 -- and tail are empty.  To make things easy, we use __newindex to amend the
 -- environment in place.
-Envr.new = function(bindings)
-    local repr = Repr.new(KINDS.ENVR, Repr.bot, Repr.bot)
+local Envr = Repr:Refine(function (This, bindings)
+    local repr = Repr:new(KINDS.ENVR, Repr.bot)
+    
     repr.bindings = bindings
-
     local s = Repr.pretty_index[repr]
 
     repr:register(function()
@@ -218,40 +215,26 @@ Envr.new = function(bindings)
         return "Envr(" .. tostring(s())  .. "){ " .. cts .. "}"
     end)
 
-    -- Since lookup points to bindings, we need this subtable to point to the
-    -- prototype.
-    setmetatable(repr.bindings, { __index = Repr })
     setmetatable(repr, {
+        __eager = true, -- Tell Prototype to use this __index first.
         __index = repr.bindings,
         __newindex = function(self, k, v)
             assert(Term.is_var(k), "Invalid variable: " .. tostring(k))
             self.bindings[k] = v
-        end,
-        __tostring = function(self)
-            local s = Repr.pretty_index[self]
-            if s then
-                return s()
-            else
-                local s = Repr.tostring(self)
-                local cts = ""
-                for k,v in pairs(self.bindings) do
-                    cts = cts .. tostring(k) .. " -> " .. tostring(v) .. ", "
-                end
-                return s .. ":{ " .. cts .. " }"
-            end
         end
     })
+
     return repr
-end
+end)
 
-Envr.empty = Envr.new({})
+Envr.empty = Envr:new({})
 
-Envr.dupl = function(env)
+function Envr.dupl (self)
     local new_bindings = {}
-    for k, v in pairs(env.bindings) do
+    for k, v in pairs(self.bindings) do
         new_bindings[k] = v
     end
-    return Envr.new(new_bindings)
+    return Envr:new(new_bindings)
 end
 
 -- If E is an environment, and x is a repr of a variable, then E[x] is the term
@@ -264,12 +247,21 @@ end
 
 -- To keep things, simple, we will only implement three continuation frames we
 -- need for a CK-machine: push and return, and a halt frame.
-local Cont = {}
-setmetatable(Cont, { __index = Repr, __tostring = Repr.tostring })
+local Cont = Repr:Refine(function (This, CAT, x, env, k) 
+    local repr = Repr:new(KINDS.CONT, CAT, x, env, k)
+    
+    local s = This.Prettify_Methods[CAT](x, env, k)
+    repr:register(s)
+    return repr
+end)
 
-Cont.HALT = Repr.new(KINDS.CONT, Repr.fresh())
-Cont.PUSH = Repr.new(KINDS.CONT, Repr.fresh())
-Cont.RETURN = Repr.new(KINDS.CONT, Repr.fresh())
+Cont.HALT = Repr:new(KINDS.CONT, Repr.fresh())
+Cont.PUSH = Repr:new(KINDS.CONT, Repr.fresh())
+Cont.RETURN = Repr:new(KINDS.CONT, Repr.fresh())
+
+Cont.HALT:register("HALT")
+Cont.PUSH:register("PUSH")
+Cont.RETURN:register("RETURN")
 
 -- We have to construct the pretty printer at define time.
 Cont.Prettify_Methods = {}
@@ -292,29 +284,16 @@ Cont.Prettify_Methods[Cont.RETURN] = function(x, env, k)
     end
 end
 
-Cont.Halt = Repr.new(KINDS.CONT, Cont.HALT, Repr.bot)
-setmetatable(Cont.Halt, { __index = Cont, __tostring = Repr.tostring })
-local s = Cont.Prettify_Methods[Cont.HALT]()
-Cont.Halt:register(s)
-
-
-Cont.New = function(head, x, env, k)
-    local repr = Repr.new(KINDS.CONT, head, x, env, k)
-    setmetatable(repr, { __index = Cont, __tostring = Repr.tostring })
-    
-    local s = Cont.Prettify_Methods[head](x, env, k)
-    repr:register(s)
-    return repr
-end
+Cont.Halt = Cont:new(Cont.HALT, Repr.bot)
 
 Cont.Push = function(arg, env, k)
     -- TODO: Check that func is a term and env is an environment.
-    return Cont.New(Cont.PUSH, arg, env, k)
+    return Cont:new(Cont.PUSH, arg, env, k)
 end
 
 Cont.Return = function(func, env, k)
     -- TODO: Check that value is a term and env is an environment.
-    return Cont.New(Cont.RETURN, func, env, k)
+    return Cont:new(Cont.RETURN, func, env, k)
 end
 
 function Cont.is_halt(c)
@@ -362,16 +341,9 @@ end
 -- machine has more computation to do, or lookup has failed because the original
 -- program had a free variable. In that case, the machine will return the
 -- current term verbatim.
-local CK = {}
-
-CK.new = function(term, env, cont)
-    local ck = {}
-    ck.term = term
-    ck.env = env
-    ck.cont = cont
-    setmetatable(ck, { __index = CK })
-    return ck
-end
+local CK = Prototype:Refine(function (This, term, env, cont)
+    return {term = term, env = env, cont = cont}
+end)
 
 CK.steps = {}
 CK.steps[Term.VAR] = {}
@@ -526,7 +498,7 @@ CK.steps[Term.APP][Cont.RETURN] = function(self)
 end
 
 
-CK.step = function(self)
+function CK.step (self)
     -- We first pattern match on the term. Since the head of every term is a
     -- repr describing the term's constructor, this is just a table lookup.
     local term = self.term
@@ -538,7 +510,7 @@ CK.step = function(self)
     return CK.steps[term_head][cont_head](self)
 end
 
-CK.run = function(self)
+function CK.run (self)
     while true do
         local result = self:step()
         if result then
@@ -568,7 +540,7 @@ program = Term.app(
     omega
 )
 
-ck_state = CK.new(program, Envr.empty, Cont.Halt)
+ck_state = CK:new(program, Envr.empty, Cont.Halt)
 
 print(tostring(program))
 print("===============")
