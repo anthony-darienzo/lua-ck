@@ -13,14 +13,6 @@ local KINDS = {
     LITR = "literal"
 }
 
-local function fst(t)
-    return t[1]
-end
-
-local function snd(t)
-    return t[2]
-end
-
 -- The general structure of a repr is a kind of hacky S-expression. There are
 -- three fields: 'kind', 'head', and 'tail'. The 'head' is a repr that
 -- represents the prototype of the term. The 'tail' is a list of reprs that
@@ -194,7 +186,19 @@ end
 -- capture-avoiding substitution now. Instead, applications will push arguments
 -- to an environment.
 --
--- An environment is a hashtable from variables to terms. Lua makes this easy.
+-- An environment is a hashtable from variables to closures. Lua makes this
+-- easy.
+local Closure = Prototype:Refine(function (This, t, e)
+    return {term = t, env = e}
+end)
+
+Closure:metamethods {
+    __tostring = function(self)
+        local s = tostring(self.term)
+        return string.format("{%s, ..}", s)
+    end
+}
+
 -- We put the environment's contents into a new field called `bindings`. Head
 -- and tail are empty.  To make things easy, we use __newindex to amend the
 -- environment in place.
@@ -224,7 +228,7 @@ local Envr = Repr:Refine(function (This, bindings)
     return repr
 end)
 
-Envr.empty = Envr:new({})
+Envr.empty = Envr:new {}
 
 function Envr.dupl (self)
     local new_bindings = {}
@@ -243,7 +247,7 @@ end
 -- in which the term is being evaluated.
 
 -- To keep things, simple, we will only implement three continuation frames we
--- need for a CK-machine: push and return, and a halt frame.
+-- need for a CK-machine: push and enter, and a halt frame.
 local Cont = Repr:Refine(function (This, CAT, x, env, k) 
     local repr = Repr:new(KINDS.CONT, CAT, x, env, k)
     
@@ -252,86 +256,65 @@ local Cont = Repr:Refine(function (This, CAT, x, env, k)
     return repr
 end)
 
-Cont.HALT = Repr:new(KINDS.CONT, Repr.fresh())
-Cont.PUSH = Repr:new(KINDS.CONT, Repr.fresh())
-Cont.RETURN = Repr:new(KINDS.CONT, Repr.fresh())
+Cont.HALT  = Repr:new(KINDS.CONT, Repr.fresh())
+Cont.PUSH  = Repr:new(KINDS.CONT, Repr.fresh())
+Cont.ENTER = Repr:new(KINDS.CONT, Repr.fresh())
 
 Cont.HALT:register("HALT")
 Cont.PUSH:register("PUSH")
-Cont.RETURN:register("RETURN")
+Cont.ENTER:register("ENTER")
 
 -- We have to construct the pretty printer at define time.
 Cont.Prettify_Methods = {}
 
 Cont.Prettify_Methods[Cont.HALT] = function(x, env, k)
     return function ()
-        return "HALT"
+        return "Halt"
     end
 end
 
 Cont.Prettify_Methods[Cont.PUSH] = function(x, env, k)
     return function () 
-        return string.format("PUSH(%s,%s) :: %s", tostring(x), tostring(env), tostring(k))
+        return string.format("Push(%s, %s) :: %s", tostring(x), tostring(env), tostring(k))
     end
 end
 
-Cont.Prettify_Methods[Cont.RETURN] = function(x, env, k)
+Cont.Prettify_Methods[Cont.ENTER] = function(x, env, k)
     return function()
-        string.format("[_ -> (%s,%s)] :: %s", tostring(x), tostring(env), tostring(k))
+        return string.format("[_ -> (%s, %s)] :: %s", tostring(x), tostring(env), tostring(k))
     end
 end
 
-Cont.Halt = Cont:new(Cont.HALT, Repr.bot)
+Cont.halt = Cont:new(Cont.HALT, Repr.bot)
 
-Cont.Push = function(arg, env, k)
-    -- TODO: Check that func is a term and env is an environment.
-    return Cont:new(Cont.PUSH, arg, env, k)
+Cont.push = function(arg, env, k)
+    -- TODO: Check that arg is a term and env is an environment.
+    local c = Cont:new(Cont.PUSH, arg, env, k)
+    c.arg = function() return c.tail[1] end
+    c.env = function() return c.tail[2] end
+    c.k   = function() return c.tail[3] end
+    return c
 end
 
-Cont.Return = function(func, env, k)
+Cont.enter = function(lam, env, k)
     -- TODO: Check that value is a term and env is an environment.
-    return Cont:new(Cont.RETURN, func, env, k)
+    local c = Cont:new(Cont.ENTER, lam, env, k)
+    c.lam = function() return c.tail[1] end
+    c.env  = function() return c.tail[2] end
+    c.k    = function() return c.tail[3] end
+    return c
 end
 
 function Cont.is_halt(c)
-    return c == Cont.Halt
-end
-
-function Cont.push_arg(c)
-    assert(c.kind == KINDS.CONT and c.head == Cont.PUSH, "Invalid push frame: " .. tostring(c))
-    return c.tail[1]
-end
-
-function Cont.push_env(c)
-    assert(c.kind == KINDS.CONT and c.head == Cont.PUSH, "Invalid push frame: " .. tostring(c))
-    return c.tail[2]
-end
-
-function Cont.push_cont(c)
-    assert(c.kind == KINDS.CONT and c.head == Cont.PUSH, "Invalid push frame: " .. tostring(c))
-    return c.tail[3]
-end
-
-function Cont.return_func(c)
-    assert(c.kind == KINDS.CONT and c.head == Cont.RETURN, "Invalid return frame: " .. tostring(c))
-    return c.tail[1]
-end
-
-function Cont.return_env(c)
-    assert(c.kind == KINDS.CONT and c.head == Cont.RETURN, "Invalid return frame: " .. tostring(c))
-    return c.tail[2]
-end
-
-function Cont.return_cont(c)
-    assert(c.kind == KINDS.CONT and c.head == Cont.RETURN, "Invalid return frame: " .. tostring(c))
-    return c.tail[3]
+    return c == Cont.halt
 end
 
 -- Finally, we can define the CK-machine. The CK-machine is a state machine that
 -- evaluates terms in a given environment. The state of the CK-machine is a
 -- triple of a term, an environment, and a continuation. The CK-machine has two
--- rules: the apply rule and the return rule. The apply rule applies a function
--- to an argument, and the return rule returns a value to the continuation.
+-- rules: the push rule and the enter rule. The push rule applies a function
+-- to an argument, and the enter rule propagates an argument to a function body
+-- in the continuation.
 
 -- When the CK-machine reaches a halt state, if the current term is a variable,
 -- then the machine will look up the variable in the environment. Otherwise, the
@@ -341,6 +324,12 @@ end
 local CK = Prototype:Refine(function (This, term, env, cont)
     return {term = term, env = env, cont = cont}
 end)
+
+CK:metamethods {
+    __tostring = function(self)
+        return string.format("< %s || %s || %s >", self.term, self.env, self.cont)
+    end
+}
 
 CK.steps = {}
 CK.steps[Term.VAR] = {}
@@ -352,7 +341,7 @@ CK.steps[Term.VAR] = {}
 -- Schematically, these are the transition rules.
 --
 -- (M N, e, k) -> (M, e:dupl() , push(N, e) :: k)
--- (lam x. M, e', push(N,e) :: k) -> (N, e, return(lam x.M, e') :: k)
+-- (lam x. M, e', push(N,e) :: k) -> (N, e, enter(lam x.M, e') :: k)
 -- (x, e, k) -> (v', e', k), where e[x] = (v',e')
 --
 
@@ -361,8 +350,8 @@ CK.steps[Term.VAR] = {}
 CK.steps[Term.VAR][Cont.HALT] = function(self)
     local closure = self.env[self.term]    
     if closure then
-        self.term   = fst(closure)
-        self.env    = snd(closure)
+        self.term   = closure.term
+        self.env    = closure.env
         return
     else
         return tostring(self.term)
@@ -375,35 +364,35 @@ end
 CK.steps[Term.VAR][Cont.PUSH] = function(self)
     local closure = self.env[self.term]
     if closure then
-        self.term   = fst(closure)
-        self.env    = snd(closure)
+        self.term   = closure.term
+        self.env    = closure.env
         return
     else
-        local arg = Cont.push_arg(self.cont)
+        local arg = self.cont.arg()
         return string.format("%s @PUSH %s", tostring(self.term), tostring(arg))
     end
 
     error("This line should be unreachable.")
 end
 
--- (y, e', return(lam x. M, e) :: k) -> (M, e[x -> (y,e')], k)
-CK.steps[Term.VAR][Cont.RETURN] = function(self)
+-- (y, e', enter(lam x. M, e) :: k) -> (M, e[x -> (y,e')], k)
+CK.steps[Term.VAR][Cont.ENTER] = function(self)
     local term = self.term
     local env  = self.env    
     local cont = self.cont
 
-    local lam = Cont.return_func(cont)
+    local lam = cont.lam()
     
     local bound_var = Term.lam_bound_var(lam)
     local body = Term.lam_body(lam)
 
-    local kenv  = Cont.return_env(cont)
-    local k     = Cont.return_cont(cont)
+    local kenv  = cont.env()
+    local k     = cont.k()
 
     -- Should we duplicate kenv?
     -- I don't think so, since we can think of (lam x. M, e) as a closure which
     -- was already existent.
-    kenv[bound_var] = {term, env}
+    kenv[bound_var] = Closure:new(term, env)
 
     self.term   = body
     self.env    = kenv
@@ -417,37 +406,39 @@ CK.steps[Term.LAM][Cont.HALT] = function(self)
     return tostring(self.term)
 end
 
--- (lam x. t, e', push (M,e) :: k) -> (M, e, return (lam x. t, e') :: k)
+-- (lam x. t, e', push (M,e) :: k) -> (M, e, enter (lam x. t, e') :: k)
 -- Probably should rename the "return" continuation to, e.g., "call".
 -- All we are doing is left-to-right call-by-value.
 CK.steps[Term.LAM][Cont.PUSH] = function(self)
-    local arg = Cont.push_arg(self.cont)
+    local cont = self.cont
+    local arg = cont.arg()
     local senv = self.env -- e'
-    local kenv = Cont.push_env(self.cont) -- e
-    local k = Cont.push_cont(self.cont)
+    local kenv = cont.env() -- e
+    local k = cont.k()
 
     local lam = self.term
     
     self.term = arg
     self.env = kenv
-    self.cont = Cont.Return(lam, senv, k)
+    self.cont = Cont.enter(lam, senv, k)
 end
 
 -- The environment probably needs to track e'
--- (lam x. t, e', return (lam x' . M, e) :: k) 
+-- (lam x. t, e', enter (lam x' . M, e) :: k) 
 --      -> (M, e[x' -> (lam x . t, e')], k)
-CK.steps[Term.LAM][Cont.RETURN] = function(self)
+CK.steps[Term.LAM][Cont.ENTER] = function(self)
     local term = self.term -- lam x . t
-    local lam = Cont.return_func(self.cont) -- lam x'. M
+    local cont = self.cont
+    local lam = cont.lam() -- lam x'. M
 
     local bound_var = Term.lam_bound_var(lam)
     local body = Term.lam_body(lam)
 
     local env = self.env -- e'
-    local kenv = Cont.return_env(self.cont) -- e
-    local k = Cont.return_cont(self.cont)
+    local kenv = cont.env() -- e
+    local k = cont.k()
 
-    kenv[bound_var] = {term, env}
+    kenv[bound_var] = Closure:new(term, env)
 
     self.term = body
     self.env = kenv
@@ -467,7 +458,7 @@ CK.steps[Term.APP][Cont.HALT] = function(self)
 
     self.term = func
     self.env = new_env
-    self.cont = Cont.Push(arg, env, self.cont)
+    self.cont = Cont.push(arg, env, self.cont)
 end
 
 CK.steps[Term.APP][Cont.PUSH] = function(self)
@@ -479,10 +470,10 @@ CK.steps[Term.APP][Cont.PUSH] = function(self)
     
     self.term = func
     self.env = new_env
-    self.cont = Cont.Push(arg, env, self.cont)
+    self.cont = Cont.push(arg, env, self.cont)
 end
 
-CK.steps[Term.APP][Cont.RETURN] = function(self)
+CK.steps[Term.APP][Cont.ENTER] = function(self)
     local func = Term.app_func(self.term)
     local arg = Term.app_arg(self.term)
 
@@ -491,7 +482,7 @@ CK.steps[Term.APP][Cont.RETURN] = function(self)
 
     self.term = func
     self.env = new_env
-    self.cont = Cont.Push(arg, env, self.cont)
+    self.cont = Cont.push(arg, env, self.cont)
 end
 
 
@@ -516,15 +507,29 @@ function CK.run (self)
     end
 end
 
+function CK.trace (self)
+    print(self)
+    indent = ""
+    while true do
+        local result = self:step()
+        if result then
+            print("===> " .. tostring(result))
+            return
+        end
+        indent = indent .. "  "
+        print(indent .. "-> " .. tostring(self))
+    end
+end
+
 -- Now we write an example program.
 x = Term.fresh_var()
-x:register(function() return "x" end)
+x:register("x")
 
 y = Term.fresh_var()
-y:register(function() return "y" end)
+y:register("y")
 
 z = Term.fresh_var()
-z:register(function() return "z" end)
+z:register("z")
 
 
 omega = Term.lam(x, Term.app(x, x))
@@ -537,13 +542,5 @@ program = Term.app(
     omega
 )
 
-ck_state = CK:new(program, Envr.empty, Cont.Halt)
-
-print(tostring(program))
-print("===============")
-res = ck_state:run()
-print(string.format("FINAL VALUE: %s", res)) -- should print y
-print("===============")
-print(string.format("FINAL TERM: %s", tostring(ck_state.term)))
-print(string.format("FINAL CONT: %s", tostring(ck_state.cont)))
-print(string.format("FINAL ENVR: %s", tostring(ck_state.env)))
+ck = CK:new(program, Envr.empty, Cont.halt)
+ck:trace()

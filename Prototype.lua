@@ -129,13 +129,13 @@ function Prototype.Conform(Parent, obj)
     end
     local e = mt[Hidden].__eager
    
-    if not i then mt.__index = Parent end
-
-    if e then
+    if not i then 
+        mt.__index = Parent 
+    elseif i and e then
         mt.__index = function(t,k)
             return i(t,k) or Parent[k] or nil
         end
-    else
+    elseif i then
         mt.__index = function(t,k)
             return Parent[k] or i(t,k) or nil
         end
